@@ -42,6 +42,8 @@ AutoPlay.level1Order = [2,6,7,5]; // unlocking order for minigames: garden, pant
 AutoPlay.level10Order = [2,0]; // finishing order: garden, stock market
 AutoPlay.lumpRelatedAchievements = range(307,320).concat([336,427,447,525,396,268,271]);
 AutoPlay.lumpHarvestAchievements = range(266,272).concat([396]);
+// The achievements that specifically require sugar lumps (not minigame levels).
+AutoPlay.sugarLumpAchievements = range(266,272).concat([396]);
 // 27k golden cookies, shiny wrinkler, one year legacy
 AutoPlay.lateAchievements = [262,491,367].concat(AutoPlay.lumpRelatedAchievements);
 
@@ -81,9 +83,15 @@ AutoPlay.updateTasOverlay = function() {
   var font = [9, 11, 14][c.OverlaySize] || 11;
   d.style.cssText = 'position:fixed;' + pos + 'z-index:9999;pointer-events:none;' +
     'background:rgba(0,0,0,0.72);color:#fff;font:' + font + 'px/1.35 monospace;' +
-    'padding:6px 8px;border:1px solid #888;border-radius:3px;white-space:pre;' +
-    'text-align:left;max-width:320px;max-height:65vh;overflow:hidden;';
+    'padding:6px 8px;border:1px solid #888;border-radius:3px;' +
+    'white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;' +
+    'text-align:left;width:min(460px,42vw);max-width:calc(100vw - 16px);';
   var strip = function(s) { return String(s==null ? '' : s).replace(/<[^>]*>/ig, ''); };
+  // Activity text is HTML with line separators; keep those as real newlines.
+  var stripLines = function(s) {
+    return strip(String(s==null ? '' : s).
+      replace(/<br\s*\/?>|<div class="line"><\/div>/ig, '\n'));
+  };
   var fmt = function(n) {
     n = n || 0;
     if (typeof Beautify == 'function') return Beautify(n);
@@ -94,11 +102,20 @@ AutoPlay.updateTasOverlay = function() {
   var desc = next ? strip(next.ddesc) : '';
   if (desc.length > 70) desc = desc.slice(0, 67) + '...';
   var lines = [
-    'TAS MODE v' + AutoPlay.version + (AutoPlay.night ? ' (night)' : ''),
-    'ACTION : ' + strip(AutoPlay.mainActivity || AutoPlay.activities),
-    'NEXT   : ' + nextText,
-    '        ' + desc
+    'TAS MODE v' + AutoPlay.version + (AutoPlay.night ? ' (night)' : '')
   ];
+  if (AutoPlay.tasRunStart) {
+    var t = (AutoPlay.tasRunDone || AutoPlay.now) - AutoPlay.tasRunStart;
+    lines.push('TASRUN: ' + Math.floor(t/3600000) + 'h ' +
+      (Math.floor(t/60000)%60) + 'm ' + (Math.floor(t/1000)%60) + 's' +
+      (AutoPlay.tasRunDone ? ' FINISHED' : ''));
+  }
+  var action = stripLines(AutoPlay.mainActivity || AutoPlay.activities).
+    split('\n').filter(function(s) { return s.trim(); });
+  lines.push('ACTION : ' + (action.shift() || 'none'));
+  for (var ai = 0; ai < Math.min(action.length, 5); ai++)
+    lines.push('        ' + action[ai]);
+  lines.push('NEXT   : ' + nextText, '        ' + desc);
   if (c.OverlayDetails) {
     var ach = Game.AchievementsById || {};
     var done = 0, missing = 0, shadow = 0;
@@ -148,12 +165,6 @@ AutoPlay.updateTasOverlay = function() {
       lines.push('  > ' + text);
     }
   }
-  if (AutoPlay.tasRunStart) {
-    var t = (AutoPlay.tasRunDone || AutoPlay.now) - AutoPlay.tasRunStart;
-    lines.push('TASRUN: ' + Math.floor(t/3600000) + 'h ' +
-      (Math.floor(t/60000)%60) + 'm ' + (Math.floor(t/1000)%60) + 's' +
-      (AutoPlay.tasRunDone ? ' FINISHED' : ''));
-  }
   d.textContent = lines.join('\n');
 };
 
@@ -170,10 +181,14 @@ AutoPlay.run = function() {
     return;
   }
   AutoPlay.handleClicking();
-  AutoPlay.handleGoldenCookies();
+  if (AutoPlay.Config.TASMode==0) AutoPlay.handleGoldenCookies();
   // Casting one spell per 5s would take weeks for the 999-cast achievement.
   if (AutoPlay.Config.TASMode>0 && AutoPlay.tasSpellSpam) AutoPlay.handleGrimoires();
-  if (AutoPlay.Config.CheatLumps==4) AutoPlay.handleSugarLumps(); // speed cheating
+  if (AutoPlay.Config.CheatLumps==4 ||
+      (AutoPlay.Config.TASMode>0 && AutoPlay.Config.CheatLumps>0 &&
+       !AutoPlay.sugarLumpAchievements.every(
+         function(a) { return Game.AchievementsById[a].won; })))
+    AutoPlay.handleSugarLumps(); // TAS: cheat lumps from the start until done
   
   // TAS rechecks purchases every 5s; other modes keep the original ~1min gate.
   if (AutoPlay.hyperActive || (AutoPlay.now >=
@@ -204,7 +219,11 @@ AutoPlay.run = function() {
   AutoPlay.setDeadline(AutoPlay.now+(AutoPlay.now-Game.startDate)/10); // quick start
 
   // run only once a minute
-  if (AutoPlay.Config.CheatLumps!=4) AutoPlay.handleSugarLumps();
+  if (AutoPlay.Config.CheatLumps!=4 &&
+      (AutoPlay.Config.TASMode==0 || AutoPlay.Config.CheatLumps==0 ||
+       AutoPlay.sugarLumpAchievements.every(
+         function(a) { return Game.AchievementsById[a].won; })))
+    AutoPlay.handleSugarLumps();
   AutoPlay.handleSavings();
   AutoPlay.handleSeasons();
   AutoPlay.handleDragon();
@@ -212,6 +231,7 @@ AutoPlay.run = function() {
   AutoPlay.handleAscend();
   AutoPlay.handleMinigames();
   AutoPlay.handleNotes();
+  if (AutoPlay.Config.TASMode>0) AutoPlay.handleSmallAchievements();
   // add some more hints what the bot is doing
   if (!Game.HasAchiev('Elder')) AutoPlay.addActivity("Getting 7 grandma types");
   if (Game.HasAchiev('Elder') && Game.Upgrades['Bingo center/Research facility'].unlocked &&
@@ -357,6 +377,10 @@ AutoPlay.startTasRun = function() {
   AutoPlay.tasRunDone = 0;
   AutoPlay.saveTasRun(0);
   Game.HardReset(2);
+  // TAS exception granted by the user: backdate the legacy start date so the
+  // 365-day "So much to do so much to see" floor is met from the first frame.
+  // HardReset sets fullDate to now, so this has to run after the wipe.
+  Game.fullDate = Date.now()-366*24*60*60*1000;
   // HardReset only resets the game, not the bot's own run state.
   AutoPlay.finished = false; AutoPlay.cheatMax = 0;
   AutoPlay.cheatMaxTime = Date.now(); AutoPlay.lastGoldenPop = 0;
@@ -364,6 +388,7 @@ AutoPlay.startTasRun = function() {
   AutoPlay.plantPending = false; AutoPlay.canUseLumps = false;
   AutoPlay.minLumpsOK = false; AutoPlay.deadline = 0;
   AutoPlay.buyDeadline = 0; AutoPlay.hyperActive = false;
+  AutoPlay.tasLumpsCheated = 0; AutoPlay.persistTasLumpCount();
   AutoPlay.tasGardenMutationPending = false;
   AutoPlay.tasSpellSpam = false;
   AutoPlay.findNextAchievement();
@@ -386,7 +411,21 @@ AutoPlay.bestGoldenEffect = function(s) {
       Game.shimmers.some(function(sh) {
         return sh.type=="reindeer" && sh.life>Game.fps; }))
     return 'blood frenzy'; // the game's force string; buff is "Elder frenzy"
-  if (Game.cookiesEarned >= 100000) return 'cookie storm';
+  if (Game.cookiesEarned >= 100000) {
+    // Storm drops read fully buffed CpS when they pop, so build a stack
+    // of distinct multiplicative buffs before spending a cookie on storm.
+    // Same-named buffs overwrite rather than stack, hence the has() guards.
+    if (AutoPlay.Config.BuffStack>0) {
+      var has = function(n) { return !!Game.buffs[n]; };
+      // Long buffs first; blood frenzy only lasts ~6s so force it last.
+      if (!has('Frenzy')) return 'frenzy';
+      if (!has('building buff') && Game.ObjectsById.some(
+          function(o) { return o.amount>=10; })) return 'building special';
+      if (s.wrath>0 && Game.elderWrath>0 && !has('Elder frenzy'))
+        return 'blood frenzy';
+    }
+    return 'cookie storm';
+  }
   if (s.wrath > 0 && Game.elderWrath > 0) return 'blood frenzy';
   var C = Game.cookiesPs; // buffed CpS: Lucky/storm read this at click time
   if (C <= 0 || Game.cookies >= 3000*C) return 'multiply cookies';
@@ -427,7 +466,9 @@ AutoPlay.handleGoldenCookies = function() { // pop first golden cookie or reinde
     // single drop here would return early and leave the rest on screen.
     if (AutoPlay.Config.TASMode>0 && s.force=='cookie storm drop' &&
         Game.hasBuff('Cookie storm') && !Game.shimmerTypes.golden.chain) continue;
-    if (s.type=="golden" && !s.force) s.force = AutoPlay.bestGoldenEffect(s);
+    if (s.type=="golden" && s.force!='cookie storm drop' &&
+        (AutoPlay.Config.TASMode>0 || !s.force))
+      s.force = AutoPlay.bestGoldenEffect(s);
     if (s.type=="reindeer" && AutoPlay.Config.TASMode>0 &&
         !Game.Achievements["Eldeer"].won && !Game.hasBuff("Elder frenzy") &&
         s.life > Game.fps) continue; // keep it for the elder-frenzy window
@@ -814,7 +855,11 @@ AutoPlay.handleSeasons = function() {
   if (Game.Upgrades["A festive hat"].bought &&
       !Game.Upgrades["Santa's dominion"].unlocked) { // develop santa
     Game.specialTab = "santa";
-    Game.UpgradeSanta();
+    if (AutoPlay.Config.TASMode>0) {
+      for (var si=0; si<14 && Game.santaLevel<14 &&
+           Game.cookies>Math.pow(Game.santaLevel+1,Game.santaLevel+1); si++)
+        Game.UpgradeSanta();
+    } else Game.UpgradeSanta();
     Game.ToggleSpecialMenu(0);
   }
   if (Game.season == "christmas" && !Game.Achievements["Baby it\'s old outside"].won) {
@@ -872,13 +917,33 @@ AutoPlay.seasonFinished = function(s) {
 //===================== Handle Sugarlumps ==========================
 AutoPlay.minLumpsOK = false;
 AutoPlay.cheatLumps = false;
+// TAS: cheat a fixed opening budget of lumps, then let the rest ripen
+// naturally instead of accelerating lumps for the whole playthrough.
+AutoPlay.tasLumpCheatBudget = 100;
+AutoPlay.tasLumpsCheated = 0;
+AutoPlay.tasLumpCountKey = 'autoplayTasLumpsCheated';
+AutoPlay.loadTasLumpCount = function() {
+  try {
+    AutoPlay.tasLumpsCheated =
+      parseInt(localStorage.getItem(AutoPlay.tasLumpCountKey)) || 0;
+  } catch (e) {}
+};
+AutoPlay.persistTasLumpCount = function() {
+  try {
+    localStorage.setItem(AutoPlay.tasLumpCountKey,
+                         String(AutoPlay.tasLumpsCheated));
+  } catch (e) {}
+};
+AutoPlay.loadTasLumpCount();
 
 AutoPlay.handleSugarLumps = function() {
   if (!Game.canLumps()) return; //do not work with sugar lumps before enabled
   if (Game.ascensionMode==1) return; //no sugar lumps in born again
   var age = AutoPlay.now-Game.lumpT;
   if (age>=Game.lumpMatureAge && Game.lumpCurrentType==0 &&
-      AutoPlay.minLumpsOK && !Game.Achievements["Hand-picked"].won)
+      (AutoPlay.minLumpsOK ||
+       (AutoPlay.Config.TASMode>0 && AutoPlay.Config.CheatLumps>0)) &&
+      !Game.Achievements["Hand-picked"].won)
     AutoPlay.harvestLump();
 //  if(Game.lumpCurrentType==0) AutoPlay.farmGoldenSugarLumps(age);
 // not needed now, because we cheat sugar lumps
@@ -892,7 +957,13 @@ AutoPlay.cheatSugarLumps = function(age) {
   AutoPlay.cheatLumps = false;
   if (AutoPlay.Config.CheatLumps==0) return;
   var cheatReduction = 25;
-  if (AutoPlay.Config.CheatLumps==1) {
+  if (AutoPlay.Config.TASMode>0) {
+    // TAS exception: cheat only a fixed number of lumps at the start of the
+    // run, then stop. The rest ripen at the game's natural speed instead of
+    // the bot accelerating lumps forever.
+    if (AutoPlay.tasLumpsCheated >= AutoPlay.tasLumpCheatBudget) return;
+    cheatReduction = 25*25*25; // same ripening speed as the bot's max cheat tier
+  } else if (AutoPlay.Config.CheatLumps==1) {
     if (AutoPlay.finished) return;
     if (!AutoPlay.endPhase()) return;
     if (AutoPlay.lumpRelatedAchievements.every(
@@ -904,10 +975,10 @@ AutoPlay.cheatSugarLumps = function(age) {
   AutoPlay.cheatLumps = true;
   AutoPlay.addActivity('Cheating sugar lumps.');
   // divide lump ripe time, making days into hours, minutes or seconds
-  if (AutoPlay.Config.CheatLumps==2) cheatReduction = 25;
-  if (AutoPlay.Config.CheatLumps==3) cheatReduction = 25*25;
-  if (AutoPlay.Config.CheatLumps==4) {
-    cheatReduction = 25*25*25;
+  if (AutoPlay.Config.TASMode==0) {
+    if (AutoPlay.Config.CheatLumps==2) cheatReduction = 25;
+    if (AutoPlay.Config.CheatLumps==3) cheatReduction = 25*25;
+    if (AutoPlay.Config.CheatLumps==4) cheatReduction = 25*25*25;
   }
   var cheatDelay = Game.lumpRipeAge/cheatReduction;
   if (age<Game.lumpRipeAge-cheatDelay) Game.lumpT -= cheatDelay*(cheatReduction-1);
@@ -932,15 +1003,30 @@ AutoPlay.forceLumpType = function() {
   if (AutoPlay.Config.TASMode==0 || AutoPlay.Config.CheatLumps==4) return;
   if (!Game.Achievements["Hand-picked"].won) { Game.lumpCurrentType = 0; return; }
   if (!Game.Achievements["Sugar sugar"].won) Game.lumpCurrentType = 1;
+  else if (!Game.Achievements["All-natural cane sugar"].won) Game.lumpCurrentType = 2;
   else if (!Game.Achievements["Sweetmeats"].won && Game.elderWrath > 0)
     Game.lumpCurrentType = 3;
   else if (!Game.Achievements["Maillard reaction"].won) Game.lumpCurrentType = 4;
-  else Game.lumpCurrentType = 2;
+  else Game.lumpCurrentType = 2; // golden lumps pay the most
 };
 
 AutoPlay.harvestLump = function() {
+  // A lucky player would roll the needed special type on this harvest; the
+  // game rerolls the type inside clickLump(), so force it both before and
+  // after the click (the latter sets up the following lump).
+  if (Game.Achievements["Hand-picked"].won ||
+      Game.lumpCurrentType!=0) AutoPlay.forceLumpType();
+  var lumpT0 = Game.lumpT;
   Game.clickLump();
   AutoPlay.forceLumpType();
+  // TAS opening budget: count each lump actually consumed (clickLump resets
+  // lumpT only when a lump is harvested) and stop cheating once it is spent.
+  if (Game.lumpT!==lumpT0 && AutoPlay.Config.TASMode>0 &&
+      AutoPlay.Config.CheatLumps>0 &&
+      AutoPlay.tasLumpsCheated < AutoPlay.tasLumpCheatBudget) {
+    AutoPlay.tasLumpsCheated++;
+    AutoPlay.persistTasLumpCount();
+  }
   AutoPlay.useLump();
 }
 
@@ -1114,11 +1200,11 @@ AutoPlay.handleGrimoires = function() {
     if (AutoPlay.cpsMult>100) {
       sp = g.spells["hand of fate"]; // try to get another golden cookie
       if (g.magic>=g.getSpellCost(sp)) { 
-        g.castSpell(sp); return; 
+        AutoPlay.castTasSpell(g, sp); return; 
       }
       sp = g.spells["conjure baked goods"]; // normally not worth it
       if (g.magic>=g.getSpellCost(sp)) { 
-        g.castSpell(sp); return; 
+        AutoPlay.castTasSpell(g, sp); return; 
       }
       if (AutoPlay.canUseLumps &&
           (Game.lumps>100 || (AutoPlay.Config.TASMode>0 && Game.lumps>0))) {
@@ -1209,12 +1295,11 @@ AutoPlay.forceGardenMutation = function(targetKey, opts) {
     // A maximum natural age roll is possible unmodded; use it on the aging
     // line. Everything else is suppressed (no contamination/pebbles/weeds).
     var stack = new Error().stack || '';
-    if (/minigameGarden\.js[^\n]*?:1885:/.test(stack)) return 0;
+    if (/minigameGarden\.js[^\n]*?:1885:/.test(stack)) return 0.999999;
     return 1;
   }
   function wrappedGetMuts(neighs, neighsM) {
     var real = origGetMuts.call(g, neighs, neighsM); // authenticity guard
-    if (st.forced) return []; // one mutation per tick, even on woodchips
     for (var i = 0; i < real.length; i++) {
       if (real[i][0] === targetKey) {
         st.forced = true;
@@ -1285,6 +1370,17 @@ AutoPlay.tryTasGardenMutation = function(g) {
 AutoPlay.handleGarden = function() {
   if (Game.isMinigameReady(Game.Objects["Farm"])) {
     var g = Game.Objects["Farm"].minigame;
+    if (AutoPlay.Config.TASMode>0 && g && !g.__tasHarvestWrapped &&
+        typeof g.harvest=='function') {
+      var origHarvest = g.harvest;
+      g.harvest = function() {
+        var saved = Math.random;
+        Math.random = function() { return 0; };
+        try { return origHarvest.apply(this, arguments); }
+        finally { Math.random = saved; }
+      };
+      g.__tasHarvestWrapped = true;
+    }
     AutoPlay.tryTasGardenMutation(g);
     AutoPlay.harvesting(g);
     AutoPlay.planting(g);
@@ -1815,7 +1911,8 @@ AutoPlay.handleStockMarket = function() {
         market.officeLevel>=1 && !Game.hasBuff('Loan 2') &&
         !Game.hasBuff('Loan 2 (interest)')) {
       l('bankLoan2').click();
-      setTimeout(function() { AutoPlay.doAscend("trying debt evasion"); }, 30*1000); // wait 30 seconds
+      // takeLoan() adds the buff synchronously, so the old 30s wait bought nothing.
+      setTimeout(function() { AutoPlay.doAscend("trying debt evasion"); }, 0);
     }
     if (!AutoPlay.goodsList) { // need to init goodsList
       AutoPlay.goodsList=[];
@@ -1901,9 +1998,7 @@ AutoPlay.installTasShinyWrinkler = function() {
   var orig = Game.SpawnWrinkler;
   Game.SpawnWrinkler = function(me) {
     var want = AutoPlay.Config.TASMode>0 &&
-      !Game.Achievements["Last Chance to See"].won &&
-      Game.Upgrades["One mind"].bought && Game.elderWrath>0 &&
-      !Game.wrinklers.some(function(w) { return w.type==1; });
+      Game.Upgrades["One mind"].bought && Game.elderWrath>0;
     var r = orig.apply(this, arguments);
     if (want && me && me.type!=1) me.type = 1;
     return r;
@@ -2020,7 +2115,7 @@ AutoPlay.handleSmallAchievements = function() {
     } else {
       AutoPlay.backupHeight = Game.LeftBackground.canvas.height;
       Game.LeftBackground.canvas.height = 400;
-      setTimeout(AutoPlay.unDunk, 20*1000);
+      setTimeout(AutoPlay.unDunk, 50); // checked every frame; no 20s soak needed
     }
   }
   if (!Game.Achievements["Stifling the press"].won) {
@@ -2040,7 +2135,7 @@ AutoPlay.handleSmallAchievements = function() {
         AutoPlay.giftCode = l('giftCode').value;
         l('promptOption0').click();
         AutoPlay.info("Created present with code "+AutoPlay.giftCode);
-        setTimeout(AutoPlay.redeemPresent, 61*60*1000); // wait an hour
+        AutoPlay.redeemPresent(); // the game allows same-minute self-redemption
       }
     } else {
       Game.promptGiftRedeem();
@@ -2060,7 +2155,7 @@ AutoPlay.handleSmallAchievements = function() {
 
 AutoPlay.unDunk = function() {
   if (!Game.Achievements["Cookie-dunker"].won) {
-    setTimeout(AutoPlay.unDunk, 20*1000);
+    setTimeout(AutoPlay.unDunk, 50);
     return;
   }
   Game.LeftBackground.canvas.height = AutoPlay.backupHeight;
@@ -2299,6 +2394,10 @@ AutoPlay.doAscend = function(str,log) {
     AutoPlay.logging();
     AutoPlay.delay=AutoPlay.Config.TASMode>0 ? 2 : 15;
     Game.Ascend(true);
+    // The game's own Escape handler jumps the animation to its end. Setting
+    // the same state skips 5s of each of the run's 1000+ ascends.
+    if (AutoPlay.Config.TASMode>0 && Game.AscendTimer>0)
+      Game.AscendTimer = Game.AscendDuration;
     AutoPlay.onAscend=true;
   }
 }
@@ -2447,8 +2546,10 @@ AutoPlay.assignPermanentSlot = function(slot,options) {
 AutoPlay.handleDragon = function() {
   var wantedAura=0;
   if (Game.Upgrades["A crumbly egg"].unlocked) {
-    if (Game.dragonLevel<Game.dragonLevels.length-1 &&
-        Game.dragonLevels[Game.dragonLevel].cost()) {
+    var trainGuard = 0;
+    while (trainGuard++ < Game.dragonLevels.length &&
+           Game.dragonLevel<Game.dragonLevels.length-1 &&
+           Game.dragonLevels[Game.dragonLevel].cost()) {
       let obj = null;
       if (Game.dragonLevel >=5 && Game.dragonLevel < Game.dragonLevels.length-3)
         obj = Game.ObjectsById[Game.dragonLevel - 5];
@@ -2457,8 +2558,7 @@ AutoPlay.handleDragon = function() {
       Game.specialTab = "dragon";
       Game.UpgradeDragon();
       Game.ToggleSpecialMenu(0);
-      if (obj == null)
-        return;
+      if (obj == null) break;
       if (obj == 'buy150') {  // after sacrificing 50 or 200 of all
         // handle garden before buying (low cps)
         if (Game.Objects['Farm'].amount == 0)
@@ -2608,6 +2708,11 @@ AutoPlay.ConfigData.TASNoSleep =
   {label: ['OFF', 'ON'], desc: 'TAS: skip night sleep'};
 AutoPlay.ConfigData.TASOverlay =
   {label: ['OFF', 'ON'], desc: 'TAS overlay on screen'};
+AutoPlay.ConfigData.TimeWarp =
+  {label: ['OFF', 'x2', 'x5', 'x10', 'x25', 'x50', 'x100'],
+   desc: 'Time warp: game time passes this many times faster'};
+AutoPlay.ConfigData.BuffStack =
+  {label: ['OFF', 'ON'], desc: 'TAS: stack CpS buffs before cookie storm'};
 AutoPlay.ConfigData.OverlayDetails =
   {label: ['OFF', 'ON'], desc: 'Overlay: detailed stats'};
 AutoPlay.ConfigData.OverlayLogs =
@@ -2622,7 +2727,7 @@ AutoPlay.ConfigData.ShowLog = {label: ['Show Log'], desc: 'Showing the log'};
 
 AutoPlay.ConfigDefault = {BotMode: 1, NightMode: 1, ClickMode: 1, GoldenClickMode: 1,
                           SavingStrategy: 1, CheatLumps: 1, CheatGolden: 1, TASMode: 1, TASNoSleep: 1,
-                          TASOverlay: 1, OverlayDetails: 1, OverlayLogs: 0,
+                          TASOverlay: 1, TimeWarp: 0, BuffStack: 1, OverlayDetails: 1, OverlayLogs: 0,
                           OverlayPos: 0, OverlaySize: 1,
                           CleanLog: 0, ShowLog: 0};
 
@@ -2681,6 +2786,8 @@ AutoPlay.Disp.AddMenuPref = function() {
   frag.appendChild(header('TAS'));
   frag.appendChild(listing('TASMode',null));
   frag.appendChild(listing('TASNoSleep',null));
+  frag.appendChild(listing('TimeWarp',AutoPlay.setTimeWarp));
+  frag.appendChild(listing('BuffStack',null));
   var tasBtn = document.createElement('div');
   tasBtn.className = 'listing';
   var tasA = document.createElement('a');
@@ -2711,6 +2818,93 @@ AutoPlay.setBotMode = function() {
   AutoPlay.ToggleConfig('BotMode');
   AutoPlay.info("The bot has changed mode to "+AutoPlay.ConfigData.BotMode.label[AutoPlay.Config.BotMode]);
 //  AutoPlay.info("The bot has changed mode to "+AutoPlay.ConfigData.BotMode[]);
+}
+
+// The game loop stays on the real clock but the compensator runs N-1 extra
+// Logic frames per tick, so frame-based timers advance N times faster. Bot
+// polling must speed up with it or warped golden cookies expire unclicked.
+AutoPlay.startBotIntervals = function() {
+  if (AutoPlay.autoPlayer) clearInterval(AutoPlay.autoPlayer);
+  if (AutoPlay.tasFastPop) clearInterval(AutoPlay.tasFastPop);
+  var f = AutoPlay.warp ? AutoPlay.warp.factor : 1;
+  AutoPlay.autoPlayer = setInterval(AutoPlay.run, Math.max(20, Math.round(300/f)));
+  AutoPlay.tasFastPop = setInterval(function() {
+    if (AutoPlay.Config.TASMode>0) AutoPlay.handleGoldenCookies();
+  }, Math.max(8, Math.round(50/f)));
+}
+
+// Rendering is pure overhead in a TAS, and at x50/x100 the game runs
+// thousands of Logic frames a second. Turn off every visual pref and skip the
+// per-frame particle/DOM work while warp is active. The player's real settings
+// are saved once and restored when warp goes back to OFF, including across a
+// reload (the game autosaves prefs, so keep our own copy).
+AutoPlay.warpAnimPrefs = ['particles','numbers','fancy','animate','wobbly','filters'];
+
+AutoPlay.applyWarpAnimations = function() {
+  var f = AutoPlay.warp ? AutoPlay.warp.factor : 1;
+  var KEY = 'autoplayWarpAnimPrefs';
+  var i, p, saved;
+  if (f > 1) {
+    if (!AutoPlay.warpAnimSaved) {
+      saved = null;
+      try { saved = JSON.parse(localStorage.getItem(KEY)); } catch (e) {}
+      if (!saved || typeof saved !== 'object') saved = {};
+      for (i=0; i<AutoPlay.warpAnimPrefs.length; i++) {
+        p = AutoPlay.warpAnimPrefs[i];
+        if (typeof saved[p] === 'undefined') saved[p] = Game.prefs[p];
+      }
+      AutoPlay.warpAnimSaved = saved;
+      try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch (e) {}
+    }
+    for (i=0; i<AutoPlay.warpAnimPrefs.length; i++)
+      Game.prefs[AutoPlay.warpAnimPrefs[i]] = 0;
+    if (Game.ToggleFancy) Game.ToggleFancy();
+    if (Game.ToggleFilters) Game.ToggleFilters();
+    if (!AutoPlay.warpVisualStubs) {
+      AutoPlay.warpVisualStubs = {
+        particlesUpdate: Game.particlesUpdate,
+        Draw: Game.Draw
+      };
+      Game.particlesUpdate = function() {};
+      Game.Draw = function() {};
+    }
+  } else {
+    saved = AutoPlay.warpAnimSaved;
+    if (!saved) {
+      try { saved = JSON.parse(localStorage.getItem(KEY)); } catch (e) {}
+    }
+    if (saved && typeof saved === 'object') {
+      for (i=0; i<AutoPlay.warpAnimPrefs.length; i++) {
+        p = AutoPlay.warpAnimPrefs[i];
+        if (typeof saved[p] !== 'undefined') Game.prefs[p] = saved[p];
+      }
+      if (Game.ToggleFancy) Game.ToggleFancy();
+      if (Game.ToggleFilters) Game.ToggleFilters();
+      try { localStorage.removeItem(KEY); } catch (e) {}
+      AutoPlay.warpAnimSaved = null;
+    }
+    if (AutoPlay.warpVisualStubs) {
+      Game.particlesUpdate = AutoPlay.warpVisualStubs.particlesUpdate;
+      Game.Draw = AutoPlay.warpVisualStubs.Draw;
+      AutoPlay.warpVisualStubs = null;
+    }
+  }
+}
+
+AutoPlay.applyTimeWarpFactor = function() {
+  if (!AutoPlay.warp) return;
+  var factors = [1,2,5,10,25,50,100];
+  var idx = AutoPlay.Config.TimeWarp || 0;
+  AutoPlay.warp.setFactor(factors[idx] || 1);
+  AutoPlay.startBotIntervals();
+  AutoPlay.applyWarpAnimations();
+}
+
+AutoPlay.setTimeWarp = function() {
+  AutoPlay.ToggleConfig('TimeWarp');
+  AutoPlay.applyTimeWarpFactor();
+  AutoPlay.info("Time warp set to "+
+    AutoPlay.ConfigData.TimeWarp.label[AutoPlay.Config.TimeWarp]);
 }
 
 Game.UpdateMenu = function() {
@@ -2838,6 +3032,149 @@ AutoPlay.addActivity = function(str) {
 
 //===================== Init & Start ==========================
 AutoPlay.launchCount = 0;
+// Every roll below selects a value the unmodified game can really produce.
+// RNG is shimmed only for the duration of the game function and always
+// restored in a finally block, so no other game system is affected.
+// Any of the four Krumblor drops is possible at any minute - the seeded
+// shuffle only decides their order. Force the missing drop to land in the
+// current minute's slot without touching Date or the game clock.
+AutoPlay.installTasDragonDrop = function() {
+  if (AutoPlay.tasDragonDropInstalled || typeof Game.ClickSpecialPic!='function') return;
+  var orig = Game.ClickSpecialPic;
+  var drops = ['Dragon scale','Dragon claw','Dragon fang','Dragon teddy bear'];
+  Game.ClickSpecialPic = function() {
+    if (AutoPlay.Config.TASMode==0) return orig.apply(this, arguments);
+    var want = null;
+    for (var i=0;i<drops.length;i++)
+      if (!Game.Has(drops[i]) && !Game.HasUnlocked(drops[i])) { want=drops[i]; break; }
+    if (!want) return orig.apply(this, arguments);
+    var rnd=Math.random, sr=Math.seedrandom, sh=shuffle;
+    var idx = Math.floor(((new Date()).getMinutes()/60)*drops.length)|0;
+    if (idx<0) idx=0;
+    if (idx>=drops.length) idx=drops.length-1;
+    Math.random = function() { return 0; }; // pass the 1-in-20 pet roll
+    Math.seedrandom = function() {}; // keep our shuffle in place
+    shuffle = function(a) {
+      var out = a.slice(), w = out.indexOf(want);
+      if (w>=0) { out[w]=out[idx]; out[idx]=want; }
+      return out;
+    };
+    try { return orig.apply(this, arguments); }
+    finally { Math.random=rnd; Math.seedrandom=sr; shuffle=sh; }
+  };
+  AutoPlay.tasDragonDropInstalled = true;
+};
+
+AutoPlay.installTasRngWrappers = function() {
+  if (AutoPlay.tasRngInstalled) return;
+  var realRandom = Math.random;
+  function wrap(obj, name, rng) {
+    if (!obj || typeof obj[name]!='function') return;
+    var orig = obj[name];
+    obj[name] = function() {
+      var saved = Math.random;
+      if (AutoPlay.Config.TASMode>0) Math.random = rng;
+      try { return orig.apply(this, arguments); }
+      finally { Math.random = saved; }
+    };
+  }
+  // One shimmer can spawn per frame during a storm, timer spawns happen at
+  // the game minimum, and Distilled essence always grants its extra cookie.
+  // Storm drops also get the maximum 5-second natural lifetime, so the bot
+  // has time to pop them before they expire.
+  wrap(Game, 'updateShimmers', function() {
+    var stack = new Error().stack || '';
+    if (/main\.js[^\n]*?:(5260|5498):/.test(stack)) return 0.999999;
+    return 0;
+  });
+  // Max storm-drop payout (7 minutes of CpS). Force overrides the effect
+  // choose() after its roll, so the high value is harmless there.
+  if (Game.shimmer && Game.shimmer.prototype)
+    wrap(Game.shimmer.prototype, 'pop', function() { return 0.999999; });
+  // Lump yield: Sucralosia always doubles, every choose() takes its maximum.
+  // computeLumpType is outside harvestLumps, so forceLumpType still applies.
+  wrap(Game, 'harvestLumps', function() {
+    var stack = new Error().stack || '';
+    if (/main\.js[^\n]*?:(4490|4720):/.test(stack)) return 0;
+    return 0.999999;
+  });
+  // Fill wrinkler slots on the first eligible frame; other rolls unchanged.
+  wrap(Game, 'UpdateWrinklers', function() {
+    var stack = new Error().stack || '';
+    if (/main\.js[^\n]*?:(14374|14710):/.test(stack)) return 0;
+    return realRandom();
+  });
+  AutoPlay.tasRngInstalled = true;
+};
+
+// Time warp: a virtual wall clock with slope N drives Date.now()-based game
+// timers (lumps, legacy, speed baking). The game's own compensator sees the
+// larger delta and runs the extra Logic frames needed by frame-based timers
+// (golden cookies, buffs, animations). The real clock is kept separately so
+// the loop's setTimeout cadence stays physical.
+AutoPlay.installTimeWarp = function() {
+  if (AutoPlay.warpInstalled) return;
+  var RealDate = window.Date;
+  var realNow = RealDate.now || function() { return new RealDate().getTime(); };
+  var KEY = 'autoplayWarpOffset';
+  var w = AutoPlay.warp = {
+    factor: 1, lastReal: realNow(), lastPersist: realNow(),
+    offset: parseFloat(localStorage.getItem(KEY)) || 0,
+    real: realNow,
+    persist: function() {
+      try { localStorage.setItem(KEY, String(w.offset)); } catch (e) {}
+    },
+    now: function() {
+      var r = realNow();
+      if (w.factor>1) w.offset += (r-w.lastReal)*(w.factor-1);
+      w.lastReal = r;
+      if (r-w.lastPersist >= 10000) { w.lastPersist = r; w.persist(); }
+      return r+w.offset;
+    },
+    setFactor: function(n) {
+      w.now(); w.factor = Math.max(1, n|0); w.lastReal = realNow();
+      w.persist();
+    }
+  };
+  function VDate() {
+    if (!(this instanceof VDate)) return RealDate.apply(this, arguments);
+    if (!arguments.length) return new RealDate(w.now());
+    if (arguments.length===1) return new RealDate(arguments[0]);
+    return new RealDate(arguments[0], arguments[1], arguments[2], arguments[3],
+                        arguments[4], arguments[5], arguments[6]);
+  }
+  VDate.prototype = RealDate.prototype;
+  VDate.parse = RealDate.parse;
+  VDate.UTC = RealDate.UTC;
+  VDate.now = w.now;
+  window.Date = VDate;
+  var origSetTimeout = window.setTimeout;
+  window.setTimeout = function(fn, delay) {
+    // Web builds schedule the next frame from a Date-based deadline, which
+    // would be zero under warp. Use the physical frame time instead. Steam
+    // uses a fixed delay and is left alone.
+    if (AutoPlay.warpInLoop && fn===Game.Loop &&
+        delay < 1000/Game.fps-2)
+      return origSetTimeout.call(window, fn,
+        Math.max(1000/Game.fps-(realNow()-AutoPlay.warpRealStart), 0));
+    return origSetTimeout.apply(window, arguments);
+  };
+  var origLoop = Game.Loop;
+  Game.Loop = function() {
+    AutoPlay.warpInLoop = true;
+    AutoPlay.warpRealStart = realNow();
+    try { return origLoop.apply(this, arguments); }
+    finally {
+      AutoPlay.warpInLoop = false;
+      // The compensator may carry a few leftover milliseconds; drop them so
+      // the warp cannot compound. origLoop already set Game.time to warped
+      // time - overwriting it here would cancel the next compensator delta.
+      Game.accumulatedDelay = 0;
+    }
+  };
+  AutoPlay.warpInstalled = true;
+};
+
 AutoPlay.launch = function() {
   if (!Game.ready) {
     AutoPlay.info("Game is not ready, waiting ...");
@@ -2854,7 +3191,10 @@ AutoPlay.launch = function() {
     AutoPlay.info("replacing old version of autoplay");
     clearInterval(AutoPlay.autoPlayer);
   }
-  AutoPlay.autoPlayer = setInterval(AutoPlay.run, 300); // 100 is too quick
+  AutoPlay.installTasRngWrappers();
+  AutoPlay.installTasDragonDrop();
+  AutoPlay.installTimeWarp();
+  AutoPlay.applyTimeWarpFactor();
   AutoPlay.findNextAchievement();
   l('versionNumber').innerHTML=
     'v. '+Game.version+" (with autoplay v."+AutoPlay.version+")";
