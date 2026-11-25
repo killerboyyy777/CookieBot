@@ -68,8 +68,9 @@ AutoPlay.updateTasOverlay = function() {
     if (AutoPlay.tasOverlay) AutoPlay.tasOverlay.style.display = 'none';
     return;
   }
-  if (AutoPlay.now < AutoPlay.tasOverlayNext) return;
-  AutoPlay.tasOverlayNext = AutoPlay.now + 1000;
+  var overlayNow = AutoPlay.warp ? AutoPlay.warp.real() : Date.now();
+  if (overlayNow < AutoPlay.tasOverlayNext) return;
+  AutoPlay.tasOverlayNext = overlayNow + 1000;
   if (!AutoPlay.tasOverlay) {
     var d = document.createElement('div');
     d.id = 'cookieBotTasOverlay';
@@ -149,7 +150,7 @@ AutoPlay.updateTasOverlay = function() {
         ', save ' + c.SavingStrategy);
   }
   if (c.OverlayLogs) {
-    var raw = window.localStorage.getItem('autoplayLog') || '';
+    var raw = ''; try { raw = window.localStorage.getItem('autoplayLog') || ''; } catch (e) {}
     var entries = [];
     var all = raw.split('\n');
     for (var m = 0; m < all.length; m++) {
@@ -173,7 +174,11 @@ AutoPlay.run = function() {
   AutoPlay.updateTasOverlay();
   if (Game.AscendTimer>0 || Game.ReincarnateTimer>0) return;
   if (AutoPlay.delay>0) { AutoPlay.delay--; return; }
-  if (AutoPlay.nextAchievement==397) { AutoPlay.runJustRight(); return; }
+  if (AutoPlay.nextAchievement==397) {
+    AutoPlay.runRightTicks = (AutoPlay.runRightTicks||0)+1;
+    if (AutoPlay.runRightTicks<=50) { AutoPlay.runJustRight(); return; }
+    AutoPlay.runRightTicks = 0; // fall through to core activity once
+  }
   // At the very start of a wiped save unbuffedCps is 0, so avoid 0/0.
   AutoPlay.cpsMult = Game.unbuffedCps ? Game.cookiesPs/Game.unbuffedCps : 0;
   if (AutoPlay.nightMode() && !Game.ascensionMode) {
@@ -303,6 +308,7 @@ AutoPlay.preNightMode = function() {
 
 AutoPlay.nightMode = function() {
   if (Game.OnAscend) return false;
+  if (AutoPlay.Config.TASNoSleep>0) return false;
   if (AutoPlay.Config.NightMode==0) return false;
   if (AutoPlay.Config.NightMode==1 && AutoPlay.grinding()) {
     return false; //do not auto-sleep while grinding
@@ -391,6 +397,14 @@ AutoPlay.startTasRun = function() {
   AutoPlay.tasLumpsCheated = 0; AutoPlay.persistTasLumpCount();
   AutoPlay.tasGardenMutationPending = false;
   AutoPlay.tasSpellSpam = false;
+  // A wipe during a pending action must not leak into the fresh run.
+  AutoPlay.onAscend = false;
+  AutoPlay.delay = 0;
+  AutoPlay.runRightCount = 0;
+  AutoPlay.night = false;
+  AutoPlay.buy10 = false;
+  AutoPlay.runRightTicks = 0;
+  AutoPlay.resetTime = 0;
   AutoPlay.findNextAchievement();
   Game.setVolume(0); Game.setVolumeMusic(0);
   Game.Notify('TAS run started.', '', [14,6], 6);
@@ -417,9 +431,15 @@ AutoPlay.bestGoldenEffect = function(s) {
     // Same-named buffs overwrite rather than stack, hence the has() guards.
     if (AutoPlay.Config.BuffStack>0) {
       var has = function(n) { return !!Game.buffs[n]; };
+      var hasBuildingBuff = function() {
+        if (!Game.goldenCookieBuildingBuffs) return false;
+        for (var n in Game.goldenCookieBuildingBuffs)
+          if (Game.buffs[Game.goldenCookieBuildingBuffs[n][0]]) return true;
+        return false;
+      };
       // Long buffs first; blood frenzy only lasts ~6s so force it last.
-      if (!has('Frenzy')) return 'frenzy';
-      if (!has('building buff') && Game.ObjectsById.some(
+      if (s.wrath==0 && !has('Frenzy')) return 'frenzy';
+      if (!hasBuildingBuff() && Game.ObjectsById.some(
           function(o) { return o.amount>=10; })) return 'building special';
       if (s.wrath>0 && Game.elderWrath>0 && !has('Elder frenzy'))
         return 'blood frenzy';
@@ -429,7 +449,7 @@ AutoPlay.bestGoldenEffect = function(s) {
   if (s.wrath > 0 && Game.elderWrath > 0) return 'blood frenzy';
   var C = Game.cookiesPs; // buffed CpS: Lucky/storm read this at click time
   if (C <= 0 || Game.cookies >= 3000*C) return 'multiply cookies';
-  return 'frenzy';
+  return s.wrath>0 ? 'multiply cookies' : 'frenzy';
 };
 
 AutoPlay.handleGoldenCookies = function() { // pop first golden cookie or reindeer
@@ -444,6 +464,12 @@ AutoPlay.handleGoldenCookies = function() { // pop first golden cookie or reinde
   // maxTime only makes the RNG roll succeed at that point - the same outcome
   // a lucky player could get naturally, unlike a 0-1s forced respawn.
   var golden = Game.shimmerTypes.golden;
+  // The game resets golden.time to 0 when a cookie dies of old age. Track
+  // that death so the respawn floor is measured from the miss, not only from
+  // a pop; otherwise cheatGoldenCookies could force a sub-minimum respawn.
+  if (AutoPlay.goldenWasSpawned && !golden.spawned)
+    AutoPlay.lastGoldenPop = AutoPlay.now;
+  AutoPlay.goldenWasSpawned = golden.spawned>0;
   // A wipe or ascension restarts Game.startDate; reset the cooldown baseline
   // too so the first cookie of a new run still waits the game's minimum.
   if (Game.startDate > AutoPlay.lastGoldenPop) AutoPlay.lastGoldenPop = Game.startDate;
@@ -521,7 +547,10 @@ AutoPlay.cheatGoldenCookies = function() {
     AutoPlay.cheatMax = level;
   }
   AutoPlay.addActivity('Cheating golden cookies at level ' + level + '.');
-  var levelTime = Game.shimmerTypes.golden.maxTime*level/140;
+  // Clamp to the game's own minimum: a shorter interval is impossible
+  // in the unmodded game, so keep the natural cadence floor.
+  var levelTime = Math.max(Game.shimmerTypes.golden.maxTime*level/140,
+                           Game.shimmerTypes.golden.minTime);
   if (Game.shimmerTypes.golden.time<levelTime)
     Game.shimmerTypes.golden.time = levelTime;
 /* golden cookie with building special:
@@ -663,7 +692,10 @@ AutoPlay.bestBuy = function() {
   let type = 'building';
 
   // these values are multiplied by game.cps below
-  const overrides = {
+  var cmOk = (typeof CookieMonsterData!=='undefined' &&
+    CookieMonsterData.Cache && CookieMonsterData.Upgrades &&
+    Game.cookiesPs>0);
+  const overrides = cmOk ? {
     'Plastic mouse': CookieMonsterData.Cache.AverageClicks * 0.01,
     'Iron mouse': CookieMonsterData.Cache.AverageClicks * 0.01,
     'Titanium mouse': CookieMonsterData.Cache.AverageClicks * 0.01,
@@ -694,11 +726,11 @@ AutoPlay.bestBuy = function() {
     'Cookie egg': CookieMonsterData.Cache.AverageClicks * 0.1,
     'Omelette': 0.1,
     'Elder Pledge': 0.1, // avoidbuy will catch this if have achievement
-  }
+  } : {}
 
   // change cookie monster values for some 'infinite' pp upgrades
-  for (var u in CookieMonsterData.Upgrades) {
-    if (u in overrides){
+  if (cmOk) for (var u in CookieMonsterData.Upgrades) {
+    if (u in overrides && Game.Upgrades[u]){
       CookieMonsterData.Upgrades[u].bonus = overrides[u]* Game.cookiesPs;
       CookieMonsterData.Upgrades[u].pp = (Math.max(Game.Upgrades[u].getPrice() - (Game.cookies + CookieMonsterData.Cache.WrinklersTotal), 0) / Game.cookiesPs) + (Game.Upgrades[u].getPrice() / CookieMonsterData.Upgrades[u].bonus);
     }
@@ -865,13 +897,19 @@ AutoPlay.handleSeasons = function() {
   if (Game.season == "christmas" && !Game.Achievements["Baby it\'s old outside"].won) {
     if (Game.onMenu) Game.ShowMenu('');
     Game.Objects['Grandma'].canvas.parentElement.scrollIntoView()
-    elfGrandmas = Game.Objects["Grandma"].pics.filter(function(p) { return p.pic=="elfGrandma.png"; });
+    var gm = Game.Objects['Grandma'];
+    var elfGrandmas = gm.pics.filter(function(p) { return p.pic=="elfGrandma.png"; });
+    // With warp active DrawBuildings never populates pics; set the mouse state
+    // directly so warpDrawStub can award the elf-granny achievement.
     if (elfGrandmas.length) {
-      elfGranny = elfGrandmas[0];
-      xPos = elfGranny.x+32;
-      yPos = elfGranny.y+32;
-      Game.Objects['Grandma'].mousePos=[xPos,yPos];
-      Game.Objects['Grandma'].mouseOn=true;
+      var elfGranny = elfGrandmas[0];
+      gm.mousePos=[elfGranny.x+32, elfGranny.y+32];
+      gm.mouseOn=true;
+      Game.mouseDown = 1;
+      setTimeout(AutoPlay.unElf, 1000);
+    } else if (AutoPlay.warp && AutoPlay.warp.factor>1 && gm.amount>0) {
+      gm.mousePos=[32,32];
+      gm.mouseOn=true;
       Game.mouseDown = 1;
       setTimeout(AutoPlay.unElf, 1000);
     }
@@ -1014,8 +1052,10 @@ AutoPlay.harvestLump = function() {
   // A lucky player would roll the needed special type on this harvest; the
   // game rerolls the type inside clickLump(), so force it both before and
   // after the click (the latter sets up the following lump).
-  if (Game.Achievements["Hand-picked"].won ||
-      Game.lumpCurrentType!=0) AutoPlay.forceLumpType();
+  // Only force when Hand-picked is won. If a special lump rolled
+  // naturally, keep its type so clickLump awards the type achievement
+  // and the extra yield instead of resetting it to normal.
+  if (Game.Achievements["Hand-picked"].won) AutoPlay.forceLumpType();
   var lumpT0 = Game.lumpT;
   Game.clickLump();
   AutoPlay.forceLumpType();
@@ -1030,30 +1070,39 @@ AutoPlay.harvestLump = function() {
   AutoPlay.useLump();
 }
 
+AutoPlay.doLevelUp = function(me) {
+  if (!Game.prefs.askLumps) { me.levelUp(); return; }
+  // TAS auto-spends lumps; a confirmation prompt would stall the run.
+  var old = Game.prefs.askLumps;
+  Game.prefs.askLumps = 0;
+  try { me.levelUp(); }
+  finally { Game.prefs.askLumps = old; }
+};
+
 AutoPlay.useLump = function() { // recursive call to handle many sugar lumps
   AutoPlay.canUseLumps = false;
   if (!Game.lumps) return;
   for (var i in AutoPlay.level1Order) {
     var me = Game.ObjectsById[AutoPlay.level1Order[i]];
-    if (!me.level && Game.lumps) { me.levelUp(); AutoPlay.useLump(); return; }
+    if (!me.level && Game.lumps) { AutoPlay.doLevelUp(me); AutoPlay.useLump(); return; }
   }
   var me = Game.Objects["Farm"]; // bring Garden to level 9
   if (me.level<9) {
-    if (me.level<Game.lumps) { me.levelUp(); AutoPlay.useLump(); }
+    if (me.level<Game.lumps) { AutoPlay.doLevelUp(me); AutoPlay.useLump(); }
     return;
   }
   AutoPlay.minLumpsOK = true;
   let lumpLimit = AutoPlay.endPhase()?0:100; // keep 100 lumps before the end game
   var me = Game.Objects["Cursor"]; // need 12 cursors for stock market
   if (me.level<12) {
-    if (me.level+lumpLimit<Game.lumps) { me.levelUp(); AutoPlay.useLump(); }
+    if (me.level+lumpLimit<Game.lumps) { AutoPlay.doLevelUp(me); AutoPlay.useLump(); }
     return;
   }
   for (var i = Game.ObjectsById.length-1; i>=0; i--) {
     var me = Game.ObjectsById[i];
     if (me.level<10) {
       if (me.level+lumpLimit<Game.lumps) {
-        me.levelUp(); AutoPlay.useLump(); return;
+        AutoPlay.doLevelUp(me); AutoPlay.useLump(); return;
       }
     }
   }
@@ -1061,7 +1110,7 @@ AutoPlay.useLump = function() { // recursive call to handle many sugar lumps
   var me = Game.Objects["Cursor"]; // 20 cursors for luminous gloves
   if (me.level<20) {
     if (me.level+100<Game.lumps) {
-      me.levelUp(); AutoPlay.useLump(); return;
+      AutoPlay.doLevelUp(me); AutoPlay.useLump(); return;
     } else {
       AutoPlay.canUseLumps = false;
     }
@@ -1256,14 +1305,18 @@ AutoPlay.nightAtPantheon = function(on) {
 }
 
 AutoPlay.assignSpirit = function(slot, god, force) {
-  var g=Game.Objects["Temple"].minigame;
+  var tm=Game.Objects["Temple"];
+  if (!tm || !tm.minigame || tm.level==0) return;
+  var g=tm.minigame;
   if (g.swaps+force<3) return;
   if (g.slot[slot]==g.gods[god].id) return;
   g.slotHovered = slot; g.dragging = g.gods[god]; g.dropGod();
 }
 
 AutoPlay.removeSpirit = function(slot, god) {
-  var g=Game.Objects["Temple"].minigame;
+  var tm=Game.Objects["Temple"];
+  if (!tm || !tm.minigame || tm.level==0) return;
+  var g=tm.minigame;
   if (g.slot[slot]!=g.gods[god].id) return;
   g.slotHovered = -1; g.dragging = g.gods[god]; g.dropGod();
 }
@@ -2119,7 +2172,7 @@ AutoPlay.handleSmallAchievements = function() {
     }
   }
   if (!Game.Achievements["Stifling the press"].won) {
-    savedNarrowSize = Game.tickerTooNarrow;
+    var savedNarrowSize = Game.tickerTooNarrow;
     Game.tickerTooNarrow = Game.windowW+10;
     Game.tickerL.click();
     Game.tickerTooNarrow = savedNarrowSize;
@@ -2237,7 +2290,7 @@ AutoPlay.handleAscend = function() {
   if (AutoPlay.Config.TASMode>0 && AutoPlay.nextAchievement==463 &&
       !Game.Achievements["Gaseous assets"].won) {
     AutoPlay.addActivity("Making money in stock market for achievements.");
-  } else if (AutoPlay.nextAchievement==463 && daysInRun > 10 && Game.Objects["Bank"].minigame.profit > daysInRun*300000) {
+  } else if (AutoPlay.nextAchievement==463 && daysInRun > 10 && (Game.Objects["Bank"].minigame && Game.Objects["Bank"].minigame.profit > daysInRun*300000)) {
     AutoPlay.addActivity("Making money in stock market for achievements.");
   } else {
     // Hard ascend fallback. Squaring a value that already grows with
@@ -2349,6 +2402,9 @@ AutoPlay.doReincarnate = function() {
     Game.PickAscensionMode(); Game.nextAscensionMode=1; Game.ConfirmPrompt();
   }
   Game.Reincarnate(true);
+  // TAS: skip the game's 1-second reincarnate fade; the next Logic frame
+  // performs the same cleanup the game's own ESC handler would.
+  if (AutoPlay.Config.TASMode>0) Game.ReincarnateTimer=Game.ReincarnateDuration;
   AutoPlay.resetTime=Date.now(); // save the current date for things that need to be delayed after reincarnating
   AutoPlay.neverclickWarn=true;
   AutoPlay.ascendLimit = 0.9*Math.floor(2*(1-Game.ascendMeterPercent));
@@ -2649,26 +2705,31 @@ AutoPlay.LoadConfig = function() {
   try {
     if (window.localStorage.getItem(AutoPlay.ConfigPrefix) != null) {
       AutoPlay.Config = JSON.parse(window.localStorage.getItem(AutoPlay.ConfigPrefix));
+      if (!AutoPlay.Config || typeof AutoPlay.Config !== 'object') AutoPlay.Config = {};
      // Check values
       var mod = false;
       for (var i in AutoPlay.ConfigDefault) {
-        if (typeof AutoPlay.Config[i]==='undefined' || AutoPlay.Config[i]<0 ||
+        if (typeof AutoPlay.Config[i]!=='number' || !isFinite(AutoPlay.Config[i]) || AutoPlay.Config[i]<0 ||
             AutoPlay.Config[i]>=AutoPlay.ConfigData[i].label.length) {
           mod = true;
           AutoPlay.Config[i] = AutoPlay.ConfigDefault[i];
         }
       }
       if (mod) AutoPlay.SaveConfig(AutoPlay.Config);
-    } else { // Default values
+    } else { // Default val
       AutoPlay.RestoreDefault();
     }
-  } catch (e) {}
+  } catch (e) {
+    // A corrupt saved config must not leave all settings undefined, and must
+    // not recurse through RestoreDefault -> LoadConfig -> catch.
+    AutoPlay.Config = {};
+    for (var k in AutoPlay.ConfigDefault) AutoPlay.Config[k] = AutoPlay.ConfigDefault[k];
+  }
 }
-
 AutoPlay.RestoreDefault = function() {
   AutoPlay.Config = {};
-  AutoPlay.SaveConfig(AutoPlay.ConfigDefault);
-  AutoPlay.LoadConfig();
+  for (var k in AutoPlay.ConfigDefault) AutoPlay.Config[k] = AutoPlay.ConfigDefault[k];
+  AutoPlay.SaveConfig(AutoPlay.Config);
   Game.UpdateMenu();
 }
 
@@ -2756,7 +2817,7 @@ AutoPlay.Disp.AddMenuPref = function() {
   }
   var frag = document.createDocumentFragment();
   var div = document.createElement('div');
-  div.className = 'title ' + AutoPlay.Disp.colorTextPre + AutoPlay.Disp.colorBlue;
+  div.className = 'title';
   div.textContent = 'Cookiebot Options';
   frag.appendChild(div);
   var listing = function(config,clickFunc) {
@@ -2840,6 +2901,83 @@ AutoPlay.startBotIntervals = function() {
 // reload (the game autosaves prefs, so keep our own copy).
 AutoPlay.warpAnimPrefs = ['particles','numbers','fancy','animate','wobbly','filters'];
 
+// Brief animation window at achievement wins while warp is active. Rendering
+// is stubbed for speed, but the player still needs to see achievements happen.
+// One state-preserving Draw stub shared by both warp-enable paths. Game.Draw
+// also advances drawT and unlocks buildings; keep that state while skipping
+// all rendering, or the final building stays locked forever (achievement 639).
+AutoPlay.warpDrawStub = function() {
+  Game.drawT++;
+  for (var k in Game.Objects) {
+    var me = Game.Objects[k];
+    var unlocked = (Game.cookiesEarned>=me.basePrice || me.bought>0);
+    me.locked = unlocked ? 0 : 1;
+    if (me.id==19 && unlocked) Game.Win('Cookie Clicker');
+  }
+  // DrawBuildings, which the stub replaces, is the game's only award site for
+  // "Baby it's old outside" (main.js:8344). Preserve that exact outcome.
+  if (Game.season=='christmas' &&
+      !Game.Achievements["Baby it's old outside"].won) {
+    var gm = Game.Objects['Grandma'];
+    // Under warp DrawBuildings never runs, so gm.pics stays empty. The bot
+    // sets mouse state directly (see handleSeasons); award that exact game
+    // outcome here (main.js:8344: mouseOn + mouseDown -> Game.Win).
+    if (gm && gm.mouseOn && Game.mouseDown && gm.amount>0)
+      Game.Win("Baby it's old outside");
+  }
+};
+
+AutoPlay.disableWarpVisuals = function() {
+  var i;
+  for (i=0; i<AutoPlay.warpAnimPrefs.length; i++)
+    Game.prefs[AutoPlay.warpAnimPrefs[i]] = 0;
+  if (Game.ToggleFancy) Game.ToggleFancy();
+  if (Game.ToggleFilters) Game.ToggleFilters();
+  if (!AutoPlay.warpVisualStubs) {
+    AutoPlay.warpVisualStubs = {
+      particlesUpdate: Game.particlesUpdate,
+      Draw: Game.Draw
+    };
+    Game.particlesUpdate = function() {};
+    Game.Draw = AutoPlay.warpDrawStub;
+  }
+}
+
+AutoPlay.enableWarpVisuals = function() {
+  var saved = AutoPlay.warpAnimSaved, i, p;
+  if (!saved || typeof saved !== 'object') return;
+  for (i=0; i<AutoPlay.warpAnimPrefs.length; i++) {
+    p = AutoPlay.warpAnimPrefs[i];
+    if (typeof saved[p] !== 'undefined') Game.prefs[p] = saved[p];
+  }
+  if (Game.ToggleFancy) Game.ToggleFancy();
+  if (Game.ToggleFilters) Game.ToggleFilters();
+  if (AutoPlay.warpVisualStubs) {
+    Game.particlesUpdate = AutoPlay.warpVisualStubs.particlesUpdate;
+    Game.Draw = AutoPlay.warpVisualStubs.Draw;
+    AutoPlay.warpVisualStubs = null;
+  }
+}
+
+AutoPlay.warpAchFlash = {active:false, timer:null};
+AutoPlay.flashWarpAnimations = function() {
+  if (!AutoPlay.warp || AutoPlay.warp.factor<=1 ||
+      !AutoPlay.warpVisualStubs || !AutoPlay.warpAnimSaved) return;
+  var fl = AutoPlay.warpAchFlash;
+  // Do not let a burst of wins at high warp keep re-arming the timeout: that
+  // would leave animations on indefinitely and costs real frame time.
+  if (fl.active) return;
+  fl.active = true;
+  AutoPlay.enableWarpVisuals();
+  // This setTimeout is on the real clock: our warp wrapper only re-times
+  // Game.Loop's self-schedule, so the flash lasts a fixed real time.
+  fl.timer = setTimeout(function() {
+    fl.timer = null;
+    fl.active = false;
+    if (AutoPlay.warp && AutoPlay.warp.factor>1) AutoPlay.disableWarpVisuals();
+  }, 400);
+}
+
 AutoPlay.applyWarpAnimations = function() {
   var f = AutoPlay.warp ? AutoPlay.warp.factor : 1;
   var KEY = 'autoplayWarpAnimPrefs';
@@ -2866,7 +3004,7 @@ AutoPlay.applyWarpAnimations = function() {
         Draw: Game.Draw
       };
       Game.particlesUpdate = function() {};
-      Game.Draw = function() {};
+      Game.Draw = AutoPlay.warpDrawStub;
     }
   } else {
     saved = AutoPlay.warpAnimSaved;
@@ -2920,11 +3058,24 @@ AutoPlay.info = function(s) {
   AutoPlay.debugLogging("### "+s)
 }
 
+// Cap the log to the last 200 lines; under warp it otherwise hits the
+// 5MB localStorage quota after ~1000 ascends and throws every tick.
+AutoPlay.appendLog = function(toAdd) {
+  try {
+    var before = window.localStorage.getItem("autoplayLog") || "";
+    var all = (before + toAdd).split("\n");
+    while (all.length > 200) all.shift();
+    var out = all.join("\n");
+    while (out.length > 100000 && all.length > 1) { all.shift(); out = all.join("\n"); }
+    if (out.length > 100000) out = out.slice(0, 100000);
+    window.localStorage.setItem("autoplayLog", out);
+  } catch (e) {}
+}
+
 AutoPlay.debugLogging = function(s) {
   try {
-    var before = window.localStorage.getItem("autoplayLog");
     var toAdd = "#debug logging autoplay V" + AutoPlay.version + ": " + s + "\n";
-    window.localStorage.setItem("autoplayLog",before+toAdd);
+    AutoPlay.appendLog(toAdd);
   } catch (e) {}
 }
 
@@ -2972,11 +3123,10 @@ AutoPlay.setDeadline = function(d) {
 AutoPlay.logging = function() {
   if(!AutoPlay.loggingInfo) return;
   try {
-    var before = window.localStorage.getItem("autoplayLog");
     var toAdd = "#logging autoplay V" + AutoPlay.version + " with " +
                 AutoPlay.loggingInfo + "\n" + Game.WriteSave(1) + "\n";
     AutoPlay.loggingInfo = 0;
-    window.localStorage.setItem("autoplayLog",before+toAdd);
+    AutoPlay.appendLog(toAdd);
   } catch (e) {}
 }
 
@@ -3119,7 +3269,7 @@ AutoPlay.installTimeWarp = function() {
   var KEY = 'autoplayWarpOffset';
   var w = AutoPlay.warp = {
     factor: 1, lastReal: realNow(), lastPersist: realNow(),
-    offset: parseFloat(localStorage.getItem(KEY)) || 0,
+    offset: (function() { try { return parseFloat(localStorage.getItem(KEY)) || 0; } catch (e) { return 0; } })(),
     real: realNow,
     persist: function() {
       try { localStorage.setItem(KEY, String(w.offset)); } catch (e) {}
@@ -3137,17 +3287,57 @@ AutoPlay.installTimeWarp = function() {
     }
   };
   function VDate() {
-    if (!(this instanceof VDate)) return RealDate.apply(this, arguments);
+    if (!(this instanceof VDate)) return new RealDate(w.now());
     if (!arguments.length) return new RealDate(w.now());
     if (arguments.length===1) return new RealDate(arguments[0]);
-    return new RealDate(arguments[0], arguments[1], arguments[2], arguments[3],
-                        arguments[4], arguments[5], arguments[6]);
+    // Pass exactly the supplied arguments; padding missing slots with
+    // undefined turns e.g. new Date(2013,7,8) into an Invalid Date.
+    var a = [].slice.call(arguments);
+    return new (RealDate.bind.apply(RealDate, [null].concat(a)))();
   }
   VDate.prototype = RealDate.prototype;
   VDate.parse = RealDate.parse;
   VDate.UTC = RealDate.UTC;
   VDate.now = w.now;
+  // On web, Game.LoadSave ran before VDate existed, so its offline math
+  // used the real clock against a warped save timestamp and inflated the
+  // season, pledge and research timers. Undo that inflation at install.
+  if (Game.lastDate > 0 && Game.lastDate <= w.now()) {
+    var webFrames = Math.ceil((realNow() - Game.lastDate) / 1000 * Game.fps);
+    if (webFrames < 0) {
+      if (typeof Game.seasonT === 'number' && Game.seasonT > 0) Game.seasonT = Math.max(Game.seasonT + webFrames, 1);
+      if (typeof Game.pledgeT === 'number' && Game.pledgeT > 0) Game.pledgeT = Math.max(Game.pledgeT + webFrames, 1);
+      if (typeof Game.researchT === 'number' && Game.researchT > 0) Game.researchT = Math.max(Game.researchT + webFrames, 1);
+    }
+  }
   window.Date = VDate;
+  // Keep the persisted offset in lockstep with the game's save timestamp
+  // (Game.WriteSave stamps lastDate = Game.time, which is warped). Without
+  // this a reload sees a lastDate far in the virtual future and computes a
+  // huge negative offline interval, freezing seasons/pledge/research.
+  var origWriteSave = Game.WriteSave;
+  Game.WriteSave = function() {
+    w.now();
+    w.persist();
+    return origWriteSave.apply(this, arguments);
+  };
+  window.addEventListener('beforeunload', function() {
+    w.now();
+    w.persist();
+  });
+  if (Game.lastDate && Game.lastDate > w.now()) {
+    var skew = Game.lastDate - w.now();
+    w.offset += skew;
+    w.lastReal = realNow();
+    w.persist();
+    var badFrames = Math.ceil((realNow() - Game.lastDate) / 1000 * Game.fps);
+    if (badFrames < 0) {
+      if (typeof Game.pledgeT === 'number' && Game.pledgeT > 0) Game.pledgeT = Math.max(Game.pledgeT + badFrames, 1);
+      if (typeof Game.seasonT === 'number' && Game.seasonT > 0) Game.seasonT = Math.max(Game.seasonT + badFrames, 1);
+      if (typeof Game.researchT === 'number' && Game.researchT > 0) Game.researchT = Math.max(Game.researchT + badFrames, 1);
+    }
+    Game.lastDate = w.now();
+  }
   var origSetTimeout = window.setTimeout;
   window.setTimeout = function(fn, delay) {
     // Web builds schedule the next frame from a Date-based deadline, which
@@ -3170,8 +3360,93 @@ AutoPlay.installTimeWarp = function() {
       // the warp cannot compound. origLoop already set Game.time to warped
       // time - overwriting it here would cancel the next compensator delta.
       Game.accumulatedDelay = 0;
+      // Virtual time can cross the game's 5-minute inactivity threshold in
+      // seconds under warp, tripping the timeout and killing Game.Loop.
+      if (w.factor>1) Game.delayTimeouts = 0;
     }
   };
+  // Show a brief animation window whenever the game awards an achievement.
+  if (!AutoPlay.warpWinWrapped && Game.Win) {
+    var origWin = Game.Win;
+    Game.Win = function() {
+      // Only flash when an achievement is actually newly won. Game.Win is
+      // also called repeatedly (e.g. building id 19 every few draw ticks),
+      // which would otherwise keep rendering on permanently at high warp.
+      var what = arguments[0], fresh = false, j, it;
+      if (typeof what === 'string') {
+        it = Game.Achievements[what];
+        if (it && it.won == 0) fresh = true;
+      } else if (what && typeof what === 'object') {
+        for (j in what) {
+          it = Game.Achievements[what[j]];
+          if (it && it.won == 0) { fresh = true; break; }
+        }
+      }
+      if (fresh && AutoPlay.warp && AutoPlay.warp.factor>1 &&
+          AutoPlay.warpVisualStubs && AutoPlay.warpAnimSaved)
+        AutoPlay.flashWarpAnimations();
+      return origWin.apply(this, arguments);
+    };
+    AutoPlay.warpWinWrapped = true;
+  }
+  // At high warp a JS timer callback cannot run until the 33ms loop yields,
+  // so golden cookies can expire unpopped. Pop them right after the game's
+  // shimmer update instead (still keeping the 2-frame young-shimmer guard).
+  if (!AutoPlay.warpShimmerWrapped && Game.updateShimmers) {
+    var origShimmers = Game.updateShimmers;
+    Game.updateShimmers = function() {
+      var r = origShimmers.apply(this, arguments);
+      if (AutoPlay.warp && AutoPlay.warp.factor>1 && Game.shimmers.length &&
+          AutoPlay.Config.TASMode>0) AutoPlay.handleGoldenCookies();
+      return r;
+    };
+    AutoPlay.warpShimmerWrapped = true;
+  }
+  // Third-party logic hooks run once per Logic frame (~3000/s at x100).
+  // On catch-up frames keep only the physical 30/s refresh, which is plenty
+  // for the bot's own 20ms polling of their cached data.
+  if (!AutoPlay.warpModHooksThrottled && Game.modHooks && Game.modHooks.logic) {
+    for (var h=0; h<Game.modHooks.logic.length; h++) {
+      (function(idx) {
+        var origHook = Game.modHooks.logic[idx];
+        Game.modHooks.logic[idx] = function() {
+          if (AutoPlay.warp && AutoPlay.warp.factor>1 && Game.catchupLogic===1)
+            return;
+          return origHook.apply(this, arguments);
+        };
+      })(h);
+    }
+    AutoPlay.warpModHooksThrottled = true;
+  }
+  // Storm drops pop one per Logic frame at high warp. Their Popup/SparkleAt
+  // paths force a layout (offsetWidth) and spawn sounds each time; at x100
+  // that is thousands of forced layouts per real second. Skip only the pure
+  // visuals while warped. DropEgg and me.die() are left alone (state/achievs).
+  if (!AutoPlay.warpPopupStubs) {
+    AutoPlay.warpPopupStubs = {
+      Popup: Game.Popup, SparkleAt: Game.SparkleAt,
+      PlaySound: window.PlaySound, PlayCue: window.PlayCue
+    };
+    var noVis = function() {};
+    Game.Popup = function() {
+      if (AutoPlay.warp && AutoPlay.warp.factor>1) return;
+      return AutoPlay.warpPopupStubs.Popup.apply(this, arguments);
+    };
+    Game.SparkleAt = function() {
+      if (AutoPlay.warp && AutoPlay.warp.factor>1) return;
+      return AutoPlay.warpPopupStubs.SparkleAt.apply(this, arguments);
+    };
+    // Audio lives on window (var PlaySound / var PlayCue in game main.js),
+    // not on Game. Stub only when the real globals exist.
+    if (typeof window.PlaySound === 'function') window.PlaySound = function() {
+      if (AutoPlay.warp && AutoPlay.warp.factor>1) return;
+      return AutoPlay.warpPopupStubs.PlaySound.apply(this, arguments);
+    };
+    if (typeof window.PlayCue === 'function') window.PlayCue = function() {
+      if (AutoPlay.warp && AutoPlay.warp.factor>1) return;
+      return AutoPlay.warpPopupStubs.PlayCue.apply(this, arguments);
+    };
+  }
   AutoPlay.warpInstalled = true;
 };
 
